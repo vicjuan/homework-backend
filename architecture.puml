@@ -1,0 +1,85 @@
+@startuml Notification Service Architecture
+
+title Notification Service - System Architecture (with Outbox Pattern)
+
+skinparam componentStyle rectangle
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName Arial
+
+actor "Client\n(HTTP)" as client
+
+package "Spring Boot Application" {
+
+    component "NotificationController" as controller <<REST API>>
+
+    package "Service Layer" {
+        component "NotificationService" as service
+        component "NotificationEventListener\n(@TransactionalEventListener\nAFTER_COMMIT)" as eventListener
+    }
+
+    package "Repository Layer" {
+        component "NotificationRepository\n(JPA)" as repo
+    }
+
+    package "Cache" {
+        component "RedisTemplate /\nSpring Cache" as redisTemplate
+    }
+
+    package "Outbox Poller" {
+        component "OutboxPoller\n(@Scheduled)" as poller
+        component "RocketMQTemplate" as mqTemplate
+    }
+}
+
+database "MySQL\n:3306\n(taskdb)" as mysql {
+    component "notifications\n(event_status: PENDING/PROCESSING/SENT)" as tblNotif <<table>>
+}
+
+database "Redis\n:6379\n(latest 10 records)" as redis
+queue "RocketMQ Broker\n:10911\n(notification-topic)" as rocketmq
+component "RocketMQ Namesrv\n:9876" as namesrv
+
+' HTTP flow
+client --> controller : HTTP Request\nPOST / GET / PUT / DELETE
+controller --> service
+
+' Service writes (in transaction)
+service --> repo : ① INSERT notification\n(event_status=PENDING)
+repo --> tblNotif
+
+' After commit event
+service --> eventListener : ② publishEvent()\n(triggered AFTER_COMMIT only)
+eventListener --> redisTemplate : ③ write to Redis\n(executed after commit)
+redisTemplate --> redis : GET / SET / LPUSH / LTRIM
+
+' Outbox Poller flow
+poller --> tblNotif : ④ SELECT WHERE event_status=PENDING
+poller --> mqTemplate : ⑤ syncSend()
+mqTemplate --> namesrv : resolve Broker address
+mqTemplate --> rocketmq : ⑥ publish message
+poller --> tblNotif : ⑦ UPDATE event_status=SENT
+
+note right of tblNotif
+  <b>Outbox Pattern (merged)</b>
+  Notification itself is the event payload.
+  event_status column replaces a separate outbox table.
+  INSERT with PENDING — no multi-table transaction needed.
+end note
+
+note right of eventListener
+  <b>Redis Write Ordering Guarantee</b>
+  AFTER_COMMIT ensures the DB transaction
+  has successfully committed before writing
+  to cache, preventing rollback from causing
+  cache/DB inconsistency.
+  On write failure → cache miss → self-healing.
+end note
+
+note right of poller
+  <b>Considerations</b>
+  - At-least-once delivery
+  - Consumers must implement idempotency
+  - @Scheduled polls for PENDING records
+end note
+
+@enduml
