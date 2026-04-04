@@ -6,6 +6,10 @@ spring:
     username: taskuser
     password: taskpass
     driver-class-name: com.mysql.cj.jdbc.Driver
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:init.sql
   jpa:
     hibernate:
       ddl-auto: none
